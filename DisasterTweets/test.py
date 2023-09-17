@@ -6,13 +6,20 @@ import torch
 from torch import nn
 from transformers import BertTokenizer, BertModel
 
+# tokenizer = BertTokenizer.from_pretrained('./model')
+# model = BertModel.from_pretrained("./model")
+
+# text = "Replace me by any text you'd like."
+# encoded_input = tokenizer(text, return_tensors='pt')
+# print(encoded_input)
+# output = model(**encoded_input)
+# print(output)
 
 tokenizer = BertTokenizer.from_pretrained('./model')
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, df):
-        self.labels = [label for label in df['target']]
-
+        self.labels = [label for label in df['target']] if 'target' in df else [0 for i in range(len(df['text']))]
         temp = []
         for i, text in enumerate(df['text']):
             perfix = ""
@@ -27,7 +34,13 @@ class Dataset(torch.utils.data.Dataset):
             text = re.sub(r'http://t\.co/[A-Za-z0-9]{,10}', " ", text)
             text = re.sub(r'https://t\.co/[A-Za-z0-9]{,10}', " ", text)
             temp.append(text)
-
+        
+        # import codecs
+        # h = codecs.open('show.txt', 'w', encoding='utf-8')
+        # for t in temp:
+        #     h.write(t + '\n')
+        # h.close()
+            
         self.texts = [tokenizer(text, 
             padding='max_length', 
             max_length = 512, 
@@ -59,7 +72,7 @@ class Dataset(torch.utils.data.Dataset):
 class BertClassifier(nn.Module):
     def __init__(self, dropout=0.5):
         super(BertClassifier, self).__init__()
-        self.bert = BertModel.from_pretrained('./model')
+        self.bert = BertModel.from_pretrained('./model_tune')
         self.dropout = nn.Dropout(dropout)
         self.linear = nn.Linear(768, 2)
         self.relu = nn.ReLU()
@@ -72,12 +85,11 @@ class BertClassifier(nn.Module):
         return final_layer
 
 
-def train(model, train_data, val_data, learning_rate, epochs):
-    curr_rate = 0
+def test(model, train_data, val_data, learning_rate, epochs):
     # 通过Dataset类获取训练和验证集
-    train, val = Dataset(train_data), Dataset(val_data)
+    test, val = Dataset(train_data), Dataset(val_data)
     # DataLoader根据batch_size获取数据，训练时选择打乱样本
-    train_dataloader = torch.utils.data.DataLoader(train, batch_size=32, shuffle=True)
+    train_dataloader = torch.utils.data.DataLoader(train, batch_size=64, shuffle=True)
     val_dataloader = torch.utils.data.DataLoader(val, batch_size=64)
     # 判断是否使用GPU
     use_cuda = torch.cuda.is_available()
@@ -111,66 +123,60 @@ def train(model, train_data, val_data, learning_rate, epochs):
             model.zero_grad()
             batch_loss.backward()
             optimizer.step()
-        # ------ 验证模型 -----------
-        # 定义两个变量，用于存储验证集的准确率和损失
-        total_acc_val = 0
-        total_loss_val = 0
-        # 不需要计算梯度
-        with torch.no_grad():
-            # 循环获取数据集，并用训练好的模型进行验证
-            for val_input, val_label in val_dataloader:
-            # 如果有GPU，则使用GPU，接下来的操作同训练
-                val_label = val_label.to(device)
-                mask = val_input['attention_mask'].to(device)
-                input_id = val_input['input_ids'].squeeze(1).to(device)
+            # ------ 验证模型 -----------
+            # 定义两个变量，用于存储验证集的准确率和损失
+            total_acc_val = 0
+            total_loss_val = 0
+            # 不需要计算梯度
+            with torch.no_grad():
+                # 循环获取数据集，并用训练好的模型进行验证
+                for val_input, val_label in val_dataloader:
+                # 如果有GPU，则使用GPU，接下来的操作同训练
+                    val_label = val_label.to(device)
+                    mask = val_input['attention_mask'].to(device)
+                    input_id = val_input['input_ids'].squeeze(1).to(device)
+  
+                    output = model(input_id, mask)
 
-                output = model(input_id, mask)
-
-                batch_loss = criterion(output, val_label)
-                total_loss_val += batch_loss.item()
-                
-                acc = (output.argmax(dim=1) == val_label).sum().item()
-                total_acc_val += acc
-        print(
-            f'''Epochs: {epoch_num + 1} 
-            | Train Loss: {total_loss_train / len(train_data): .3f} 
-            | Train Accuracy: {total_acc_train / len(train_data): .3f}
-            '''
-        )
-        total_acc_val = total_acc_val / len(val_data)
-        print('total_acc_val', total_acc_val)
-        if curr_rate < total_acc_val:
-            curr_rate = total_acc_val 
-            torch.save(model, 'tune.bin')
+                    batch_loss = criterion(output, val_label)
+                    total_loss_val += batch_loss.item()
+                    
+                    acc = (output.argmax(dim=1) == val_label).sum().item()
+                    total_acc_val += acc
+            # torch.save(model, 'tune.bin') 
+            print(
+                f'''Epochs: {epoch_num + 1} 
+              | Train Loss: {total_loss_train / len(train_data): .3f} 
+              | Train Accuracy: {total_acc_train / len(train_data): .3f} 
+              | Val Loss: {total_loss_val / len(val_data): .3f} 
+              | Val Accuracy: {total_acc_val / len(val_data): .3f}''')     
+    torch.save(model, 'tune.bin')
 
 
 def evaluate(model, test_data):
     test = Dataset(test_data)
-    test_dataloader = torch.utils.data.DataLoader(test, batch_size=2)
+    test_dataloader = torch.utils.data.DataLoader(test, batch_size=64)
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     if use_cuda:
         model = model.cuda()
-
+    
+    label = []
     total_acc_test = 0
     with torch.no_grad():
-        for test_input, test_label in test_dataloader:
-            test_label = test_label.to(device)
+        for test_input, _ in test_dataloader:
+            # test_label = test_label.to(device)
             mask = test_input['attention_mask'].to(device)
             input_id = test_input['input_ids'].squeeze(1).to(device)
             output = model(input_id, mask)
-            acc = (output.argmax(dim=1) == test_label).sum().item()
-            total_acc_test += acc
+            
+            # print(output.argmax(dim=1))
+            label.extend(output.argmax(dim=1).tolist())
+    test_data['target'] = label
 
-
-
-EPOCHS = 10
-model = BertClassifier()
-LR = 5e-5
 
 import pandas as pd
-
-df_train = pd.read_csv('./dataset/train.csv')
-df_val = pd.read_csv('./dataset/debug.csv')
-
-train(model, df_train, df_val, LR, EPOCHS)
+df_test = pd.read_csv('./dataset/test.csv')
+model = torch.load('./tuned/tune.bin')
+evaluate(model, df_test)
+df_test.to_csv('test.csv')
